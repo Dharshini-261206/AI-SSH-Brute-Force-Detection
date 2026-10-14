@@ -1,0 +1,221 @@
+{
+  "name": "NGP-008 - SSH Brute-Force Detector",
+  "nodes": [
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=\nAnalyze this SSH activity for defensive cybersecurity.\n\nIP address: {{ $json.ip }}\nFailed login count: {{ $json.failedCount }}\nUsernames: {{ JSON.stringify($json.usernames) }}\n\nClassify the activity as brute force, password spraying, user enumeration, or inconclusive.\n\nUse only the supplied evidence. Do not assume that multiple usernames alone prove password spraying.\n\nReturn the result in this format:\nVerdict:\nSeverity:\nRecommendation:\nEvidence:\n\nRecommendation must be either MONITOR AND INVESTIGATE or BLOCK REVIEW.\n\nDo not execute any blocking action.\n",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        544,
+        16
+      ],
+      "id": "b7418188-6821-4096-81bc-8b151e2f6592",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": "qwen/qwen3.8-27b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        432,
+        432
+      ],
+      "id": "d5e728fd-5709-49b3-8513-f8ee35d3f5e1",
+      "name": "Groq Chat Model",
+      "credentials": {
+        "groqApi": {
+          "id": "juoeUVMBTbSc2g6S",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -352,
+        16
+      ],
+      "id": "9f9ef443-bf1b-4da5-aef9-fd5863ce07b1",
+      "name": "start ssh detection"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst rawLogs = [\n  \"Failed password for admin from 192.0.2.10 port 51234 ssh2\",\n  \"Failed password for root from 192.0.2.10 port 51235 ssh2\",\n  \"Failed password for test from 192.0.2.10 port 51236 ssh2\",\n  \"Failed password for admin from 192.0.2.10 port 51237 ssh2\",\n  \"Accepted password for student from 192.0.2.20 port 51238 ssh2\"\n].join(\"\\n\");\n\nreturn [\n  {\n    json: {\n      rawLogs\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -144,
+        16
+      ],
+      "id": "e99eb7f9-9ebc-44c1-8815-5a2c91be3122",
+      "name": "generate sample ssh logs"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst data = $input.first().json;\n\n// Preserve the Webhook data and make rawLogs easy to access\nconst rawLogs =\n  data.rawLogs ??\n  data.body?.rawLogs ??\n  data.body?.body?.rawLogs;\n\nif (typeof rawLogs !== \"string\" || !rawLogs.trim()) {\n  throw new Error(\"Webhook input does not contain rawLogs.\");\n}\n\nreturn [\n  {\n    json: {\n      rawLogs: rawLogs\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        16
+      ],
+      "id": "64fbd067-0fc6-49c7-afd6-a6719c28c0b4",
+      "name": "prepare ssh log data",
+      "alwaysOutputData": false,
+      "executeOnce": false,
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst data = $input.first().json;\nconst rawLogs = data.rawLogs;\n\nif (typeof rawLogs !== \"string\" || !rawLogs.trim()) {\n  throw new Error(\"Missing rawLogs in Parse SSH Logs input.\");\n}\n\nconst counts = {};\n\nfor (const line of rawLogs.split(/\\r?\\n/)) {\n  if (!/Failed password/i.test(line)) continue;\n\n  const match = line.match(\n    /Failed password for (?:invalid user )?(\\S+) from ((?:\\d{1,3}\\.){3}\\d{1,3})/\n  );\n\n  if (!match) continue;\n\n  const username = match[1];\n  const ip = match[2];\n\n  if (!counts[ip]) {\n    counts[ip] = {\n      tag: \"NGP-008\",\n      ip,\n      failedCount: 0,\n      usernames: []\n    };\n  }\n\n  counts[ip].failedCount++;\n  counts[ip].usernames.push(username);\n}\n\nreturn Object.values(counts).map(item => ({\n  json: {\n    tag: item.tag,\n    ip: item.ip,\n    failedCount: item.failedCount,\n    usernames: [...new Set(item.usernames)],\n    flagged: item.failedCount >= 4,\n    verdict: item.failedCount >= 4\n      ? \"SUSPICIOUS SSH ACTIVITY\"\n      : \"NORMAL\"\n  }\n}));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        16
+      ],
+      "id": "9ae62b97-a105-405f-828f-949c8e554874",
+      "name": "extract ssh login data"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst crypto = require(\"crypto\");\n\n// Get the AI classification result\nconst aiResult = $input.first().json;\n\n// Get the original SSH evidence from the parser\nconst evidence = $(\"extract ssh login data\").first().json;\n\n// Create timestamp\nconst timestamp = new Date().toISOString();\n\n// Build the audit record\nconst auditRecord = {\n  tag: evidence.tag,\n  timestamp: timestamp,\n  ip: evidence.ip,\n  failedCount: evidence.failedCount,\n  usernames: evidence.usernames,\n  flagged: evidence.flagged,\n  detectionVerdict: evidence.verdict,\n  aiDecision: aiResult.output ?? aiResult\n};\n\n// Convert the record to a consistent JSON string\nconst canonicalRecord = JSON.stringify(auditRecord);\n\n// Generate SHA-256 hash\nconst sha256 = crypto\n  .createHash(\"sha256\")\n  .update(canonicalRecord)\n  .digest(\"hex\");\n\n// Return the audit record and hash\nreturn [\n  {\n    json: {\n      ...auditRecord,\n      sha256: sha256\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        864,
+        16
+      ],
+      "id": "5c1f21ac-0cde-4446-8432-1f9abc31ebc2",
+      "name": "save security audit record "
+    },
+    {
+      "parameters": {
+        "chatId": "5950769317",
+        "text": "={{ \"🟣 NGP-008 SSH Alert\\nIP: \" + $(\"save security audit record \").first().json.ip + \"\\nFailed logins: \" + $(\"save security audit record \").first().json.failedCount + \"\\nVerdict: \" + $(\"save security audit record \").first().json.detectionVerdict + \"\\nSHA-256: \" + $(\"save security audit record \").first().json.sha256 }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1040,
+        16
+      ],
+      "id": "75297f14-030c-4036-8147-d63879e0a15a",
+      "name": "send telegram",
+      "webhookId": "6546d78e-b6f9-4294-80d4-9815d933038f",
+      "credentials": {
+        "telegramApi": {
+          "id": "LUET5Ppx7DDAGicK",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "save security audit record ",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "start ssh detection": {
+      "main": [
+        [
+          {
+            "node": "generate sample ssh logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "generate sample ssh logs": {
+      "main": [
+        [
+          {
+            "node": "prepare ssh log data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "prepare ssh log data": {
+      "main": [
+        [
+          {
+            "node": "extract ssh login data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "extract ssh login data": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "save security audit record ": {
+      "main": [
+        [
+          {
+            "node": "send telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "3d90e1ef-f7e3-478b-9817-161ef76864e7",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d87c837808a87931824a7fb41679a912728ab5f04fc8828eca04205a2c62ed92"
+  },
+  "nodeGroups": [],
+  "id": "HPDkM4iQpCY3tMMH",
+  "tags": []
+}
